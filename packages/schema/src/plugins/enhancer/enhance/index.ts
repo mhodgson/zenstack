@@ -56,6 +56,10 @@ import { generateTypeDefType } from './model-typedef-generator';
 // information of delegate models and their sub models
 type DelegateInfo = [DataModel, DataModel[]][];
 
+interface ProcessClientTypesOptions {
+    usingTypedSql: boolean;
+}
+
 const LOGICAL_CLIENT_GENERATION_PATH = './logical-prisma-client';
 
 export class EnhancerGenerator {
@@ -110,6 +114,7 @@ export class EnhancerGenerator {
         const prismaImport = getPrismaClientImportSpec(this.outDir, this.options);
         let prismaTypesFixed = false;
         let resultPrismaTypeImport = prismaImport;
+        let usingTypedSql = false;
 
         if (this.needsLogicalClient) {
             prismaTypesFixed = true;
@@ -119,6 +124,7 @@ export class EnhancerGenerator {
             }
             const result = await this.generateLogicalPrisma();
             dmmf = result.dmmf;
+            usingTypedSql = result.usingTypedSql;
         }
 
         // reexport PrismaClient types (original or fixed)
@@ -130,6 +136,13 @@ export class EnhancerGenerator {
             overwrite: true,
         });
         this.saveSourceFile(modelsTs);
+
+        if (usingTypedSql) {
+            const sqlTs = this.project.createSourceFile(path.join(this.outDir, 'sql.ts'), `export * from '${resultPrismaTypeImport}/sql';`, {
+                overwrite: true,
+            });
+            this.saveSourceFile(sqlTs);
+        }
 
         const authDecl = getAuthDecl(getDataModelAndTypeDefs(this.model));
         const authTypes = authDecl ? generateAuthType(this.model, authDecl) : '';
@@ -355,13 +368,19 @@ export type Enhanced<Client> =
         // generate the prisma client
 
         // only run prisma client generator for the logical schema
-        const prismaClientGeneratorName = this.getPrismaClientGeneratorName(this.model);
+        const generatorConfig = this.getGeneratorConfig(this.model);
+        const prismaClientGeneratorName = generatorConfig.name;
         let generateCmd = `prisma generate --schema "${logicalPrismaFile}" --generator=${prismaClientGeneratorName}`;
 
         const prismaVersion = getPrismaVersion();
         if (!prismaVersion || semver.gte(prismaVersion, '5.2.0')) {
             // add --no-engine to reduce generation size if the prisma version supports
             generateCmd += ' --no-engine';
+        }
+
+        const usingTypedSql = generatorConfig.previewFeatures.includes('typedSql');
+        if (usingTypedSql) {
+            generateCmd += ' --sql';
         }
 
         try {
@@ -397,6 +416,7 @@ export type Enhanced<Client> =
             prismaSchema: logicalPrismaFile,
             // load the dmmf of the logical prisma schema
             dmmf,
+            usingTypedSql,
         };
     }
 
@@ -456,6 +476,14 @@ export type Enhanced<Client> =
             throw new PluginError(name, `Cannot find "prisma-client-js" or "prisma-client" generator in the schema`);
         }
         return gen.name;
+    }
+
+    private getGeneratorConfig(model: Model) {
+        const gen = getPrismaClientGenerator(model);
+        if (!gen) {
+            throw new PluginError(name, `Cannot find "prisma-client-js" or "prisma-client" generator in the schema`);
+        }
+        return gen;
     }
 
     private async processClientTypes(prismaClientDir: string) {
